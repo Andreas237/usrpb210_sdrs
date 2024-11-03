@@ -27,7 +27,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def plotter(samples):
+def plotter(samples, center_freq, sample_rate, bandwidth):
     samples_gpu = cp.asarray(samples)
     sp_gpu = cufft.fft(samples_gpu)
     print(f'took the fft')
@@ -39,10 +39,17 @@ def plotter(samples):
     freq_gpu = cufft.fftfreq(samples_gpu.shape[-1])
     print(f'found the freqs')
 
-    peaks_gpu, _ = cpsp.find_peaks(sp_gpu[0].real, height=0)
+    max_height = max(sp_gpu[0].real)
+    peaks_gpu, _ = cpsp.find_peaks(sp_gpu[0].real, height=1)
     print(f'found peaks')
 
-    
+    samples_gpu = samples_gpu.reshape(2000000,)
+    sp_gpu = sp_gpu.reshape(2000000,)
+    fft_shift_gpu = fft_shift_gpu.reshape(2000000,)
+    abs_fft_shift_gpu = abs_fft_shift_gpu.reshape(2000000,)
+    print(f'reshaped samples_gpu, sp_gpu, fft_shift_gpu')
+
+    samples = cp.asnumpy(samples_gpu)
     sp = cp.asnumpy(sp_gpu)
     fft_shift = cp.asnumpy(fft_shift_gpu)
     abs_fft_shift = cp.asnumpy(abs_fft_shift_gpu)
@@ -61,19 +68,21 @@ def plotter(samples):
     print(f'sp.imag.shape = {sp.imag.shape}')
     print(f'samples.shape = {samples.shape}')
     print(f'fft_shift.shape = {fft_shift.shape}')
+    print(f'abs_fft_shift.shape = {abs_fft_shift.shape}')
     print(f'freq.shape = {freq.shape}')
     print(f'peaks.shape = {peaks.shape}')
 
     print(samples[:5])
 
     # Plot the FFT magnitude spectrum
-    fig, axs = plt.subplots(2,2, sharey=True)
+    fig, axs = plt.subplots(2,2, squeeze=False)
+    plt.xticks(np.arange(min(sp),max(sp), len(sp)/200e4))
     fig.suptitle('Compare FFT Plots of the Samples')
     # axs[0, 0].plot(freq, sp[0].real, freq, sp[0].imag)
     axs[0, 1].plot(abs_fft_shift)
-    axs[1,0].plot(peaks, sp[0][peaks], 'x')
+    axs[1,0].plot(peaks, sp[peaks], 'x')
     # fig.show()
-    # plt.show()
+    plt.show()
 
 
 
@@ -94,7 +103,7 @@ def main():
     with open(args.output_file, 'wb') as f:
         np.save(f, samps, allow_pickle=False, fix_imports=False)
         print(f'Saved')
-    plotter(samps)
+    plotter(samps, args.freq, args.rate, args.rate)
 
 if __name__ == "__main__":
     main()
