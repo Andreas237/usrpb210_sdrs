@@ -39,7 +39,7 @@ def plotter(samples, center_freq, sample_rate, bandwidth):
     freq_gpu = cufft.fftfreq(samples_gpu.shape[-1])
     print(f'found the freqs')
 
-    max_height = max(sp_gpu[0].real)
+    max_height = max(sp_gpu.real)
     peaks_gpu, _ = cpsp.find_peaks(sp_gpu[0].real, height=1)
     print(f'found peaks')
 
