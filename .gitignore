@@ -1,3 +1,5 @@
 **/build/
 **/venv/
 *.dat
+*.pyc
+**/_pycache__*
