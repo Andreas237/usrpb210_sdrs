@@ -1,0 +1,7 @@
+
+
+matplotlib == 3.6.3
+scipy == 1.11.4
+numpy == 1.26.4
+uhd
+PyQt6 == 13.6.0
