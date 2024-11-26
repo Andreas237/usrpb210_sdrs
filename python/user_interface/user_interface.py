@@ -1,4 +1,13 @@
 # Thanks https://pysdr.org/content/pyqt.html
+import logging
+from sys import stdout
+
+logging.basicConfig(level = logging.DEBUG,
+                    format = '%(levelname)s | %(asctime)s | %(lineno)d | %(message)s',
+                    stream = stdout)
+
+
+
 from PyQt6.QtCore import QSize, Qt, QThread, pyqtSignal, QObject, QTimer
 from PyQt6.QtWidgets import QApplication, QMainWindow, QGridLayout, QWidget, QSlider, QLabel, QHBoxLayout, QVBoxLayout, QPushButton, QComboBox  # tested with PyQt6==6.7.0
 import pyqtgraph as pg # tested with pyqtgraph==0.13.7
@@ -15,7 +24,32 @@ sample_rate = sample_rates[0] * 1e6
 time_plot_samples = 500
 gain = 50 # 0 to 73 dB. int
 
-sdr_type = "usrp" # or "usrp" or "pluto"
+sdr_type = "usrp" # "sim" or "usrp" or "pluto" or "hackrf"
+TX = True
+
+
+def validate_hackrf_gain(gain : int) -> int:
+    if gain < 0 or gain > 11:
+        gain = 5
+    return gain
+
+def validate_hackrf_sample_rate(val: int) -> int:
+    # checks that val is within [2, 20].  Sets it to the nearest value of outside that range.
+    if val < 2:
+        return 2
+    elif val > 20:
+        return 20
+    else:
+        return val
+
+def validate_hackrf_freq(val: int) -> int:
+    # checks that val is within [1e6, 6e6].  Sets it to the nearest value of outside that range.
+    if val < 1e6:
+        return 1e6
+    elif val > 6e6:
+        return 6e6
+    else:
+        return val
 
 # Init SDR
 if sdr_type == "pluto":
@@ -27,15 +61,35 @@ if sdr_type == "pluto":
     sdr.rx_buffer_size = int(fft_size)
     sdr.gain_control_mode_chan0 = 'manual'
     sdr.rx_hardwaregain_chan0 = gain # dB
+
+elif sdr_type == "hackrf":
+    from hackrf import *
+
+    hrf = HackRF()
+    # Check that parameters are within the HackRF's documented bounds
+
+    gain = validate_hackrf_gain(gain)
+    
+    hrf.lna_gain = 8
+    hrf.vga_gain = 22
+        
+    hrf.disable_amp()
+    hrf.sample_rate = validate_hackrf_sample_rate(sample_rate) * 1e6
+    hrf.center_freq = validate_hackrf_freq(center_freq)
+
+    
 elif sdr_type == "usrp":
     import uhd
-    #usrp = uhd.usrp.MultiUSRP(args="addr=192.168.1.10")
-    # usrp = uhd.usrp.MultiUSRP(args="addr=192.168.1.201")
+    
+    # Valid antennas: TX/RX, RX2; valid channels: 0,1
+    channel = 0
     device_addr = ""
     usrp = uhd.usrp.MultiUSRP(device_addr)
-    usrp.set_rx_rate(sample_rate, 0)
-    usrp.set_rx_freq(uhd.libpyuhd.types.tune_request(center_freq), 0)
-    usrp.set_rx_gain(gain, 0)
+    usrp.set_rx_rate(sample_rate, channel)
+    usrp.set_rx_freq(uhd.libpyuhd.types.tune_request(center_freq), channel)
+    usrp.set_rx_gain(gain, channel)
+    usrp.set_rx_antenna("RX2", channel)
+    usrp.set_rx_agc(True, channel)
 
     # Set up the stream and receive buffer
     st_args = uhd.usrp.StreamArgs("fc32", "sc16")
@@ -48,6 +102,32 @@ elif sdr_type == "usrp":
     stream_cmd = uhd.types.StreamCMD(uhd.types.StreamMode.start_cont)
     stream_cmd.stream_now = True
     streamer.issue_stream_cmd(stream_cmd)
+
+    if TX:
+        def gen_samples(num_samples, samp_rate):
+            t = np.arange(num_samples) / samp_rate
+            return np.exp(1j * 2 * np.pi * 1000 * t).astype(np.complex64)
+        
+        tx_start_time = None
+        tx_center_frequency_hz = 750e6
+        tx_sample_rate_hz = 50e6
+        tx_gain_db = 10
+        tx_antenna = "TX/RX"
+        tx_channel = [0]
+        tx_duration_seconds = 5.0
+
+        # Configure the USRP for transmission
+        usrp.set_tx_rate(tx_sample_rate_hz)
+        usrp.set_tx_freq(tx_center_frequency_hz)
+        usrp.set_tx_gain(tx_gain_db)
+        # usrp.set_tx_antenna(tx_antenna, tx_channel)
+
+        # Transmit the waveform
+        num_samples = 1e6
+        waveform = gen_samples(num_samples, tx_sample_rate_hz)
+        usrp.send_waveform(
+                    waveform, tx_duration_seconds, tx_center_frequency_hz, tx_sample_rate_hz, tx_channel, tx_gain_db, tx_start_time
+                )
 
     def flush_buffer():
         for _ in range(10):
@@ -76,6 +156,13 @@ class SDRWorker(QObject):
         elif sdr_type == "usrp":
             usrp.set_rx_freq(uhd.libpyuhd.types.tune_request(val*1e3), 0)
             flush_buffer()
+        elif sdr_type == "hackrf":
+            try:
+                hrf.center_freq = validate_hackrf_freq(val)*1e3
+                logging.debug(f'updated center frequency to {hrf.center_freq}MHz')
+            except Exception as e:
+                logging.error(f'Updating the HackRF\'s center frequency generated the following exception {e}')
+                exit(1)
 
     def update_gain(self, val):
         print("Updated gain to:", val, 'dB')
@@ -85,6 +172,8 @@ class SDRWorker(QObject):
         elif sdr_type == "usrp":
             usrp.set_rx_gain(val, 0)
             flush_buffer()
+        else:
+            logging.debug(f'Ignoring gain updates for {sdr_type}')
 
     def update_sample_rate(self, val):
         print("Updated sample rate to:", sample_rates[val], 'MHz')
@@ -94,6 +183,10 @@ class SDRWorker(QObject):
         elif sdr_type == "usrp":
             usrp.set_rx_rate(sample_rates[val] * 1e6, 0)
             flush_buffer()
+        elif sdr_type == "hackrf":
+            sr = int(validate_hackrf_sample_rate(sample_rate))
+            hrf.sample_rate = sample_rates[sr] * 1e6
+            logging.debug(f'updated sample rate to {hrf.center_freq}MHz')
 
     # Main loop
     def run(self):
@@ -101,8 +194,16 @@ class SDRWorker(QObject):
 
         if sdr_type == "pluto":
             samples = sdr.rx()/2**11 # Receive samples
+        elif sdr_type == "hackrf":
+            try:
+                samples = hrf.read_samples()[:4096]
+            except Exception as e:
+                logging.error(f'Reading HackRF sample threw error {e}')
+                exit(1)
+            
         elif sdr_type == "usrp":
             streamer.recv(recv_buffer, metadata)
+            logging.debug(f'{sdr_type} has receive buffer of type {type(recv_buffer)}')
             samples = recv_buffer[0] # will be np.complex64
         elif sdr_type == "sim":
             tone = np.exp(2j*np.pi*self.sample_rate*0.1*np.arange(fft_size)/self.sample_rate)
@@ -111,19 +212,23 @@ class SDRWorker(QObject):
             # Truncate to -1 to +1 to simulate ADC bit limits
             np.clip(samples.real, -1, 1, out=samples.real)
             np.clip(samples.imag, -1, 1, out=samples.imag)
+        logging.debug(f'Using SDR {sdr_type}\t received {len(samples)}\t with type {type(samples)}\tndim: {np.ndim(samples)}\tshape: {np.shape(samples)}\tsize: {np.size(samples)}')
+        try:
+            self.time_plot_update.emit(samples[0:time_plot_samples])
 
-        self.time_plot_update.emit(samples[0:time_plot_samples])
+            PSD = 10.0*np.log10(np.abs(np.fft.fftshift(np.fft.fft(samples)))**2/fft_size)
+            self.PSD_avg = self.PSD_avg * 0.99 + PSD * 0.01
+            self.freq_plot_update.emit(self.PSD_avg)
 
-        PSD = 10.0*np.log10(np.abs(np.fft.fftshift(np.fft.fft(samples)))**2/fft_size)
-        self.PSD_avg = self.PSD_avg * 0.99 + PSD * 0.01
-        self.freq_plot_update.emit(self.PSD_avg)
+            self.spectrogram[:] = np.roll(self.spectrogram, 1, axis=1) # shifts waterfall 1 row
+            self.spectrogram[:,0] = PSD # fill last row with new fft results
+            self.waterfall_plot_update.emit(self.spectrogram)
 
-        self.spectrogram[:] = np.roll(self.spectrogram, 1, axis=1) # shifts waterfall 1 row
-        self.spectrogram[:,0] = PSD # fill last row with new fft results
-        self.waterfall_plot_update.emit(self.spectrogram)
-
-        print("Frames per second:", 1/(time.time() - start_t))
-        self.end_of_run.emit() # emit the signal to keep the loop going
+            print("Frames per second:", 1/(time.time() - start_t))
+            self.end_of_run.emit() # emit the signal to keep the loop going
+        except Exception as e:
+            logging.error(f'Caught the following exception during run {e}')
+            exit(1)
 
 
 # Subclass QMainWindow to customize your application's main window
